@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run AutoIt script",
+      "type": "shell",
+      "command": "$script = '${workspaceFolder}/script.au3'; & 'C:/Program Files (x86)/AutoIt3/AutoIt3.exe' \"$script\"",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Check Au3 syntax",
+      "type": "shell",
+      "command": "$script = '${workspaceFolder}/script.au3'; & 'C:/Program Files (x86)/AutoIt3/Au3Check.exe' \"$script\"",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build usb-updater.exe (x86)",
+      "type": "shell",
+      "command": "$script = '${workspaceFolder}/script.au3'; $output = '${workspaceFolder}/usb-updater.exe'; & 'C:/Program Files (x86)/AutoIt3/Aut2Exe/Aut2exe.exe' /in $script /out $output /x86",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
