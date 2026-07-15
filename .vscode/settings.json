@@ -1,0 +1,5 @@
+{
+  "files.associations": {
+    "*.au3": "autoit"
+  }
+}
