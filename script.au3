@@ -5,19 +5,32 @@
 
 Opt("MustDeclareVars", 1)
 
-; Copy the contents of .\data to every newly connected removable USB volume.
-; Do not enable monitoring until the correct data is in the data folder.
 Global Const $SETTLE_TIME_MS = 2500
+Global Const $REG_SETTINGS = "HKCU\Software\insan3d\usb-updater"
+Global Const $GENERIC_READ = 0x80000000
+Global Const $GENERIC_WRITE = 0x40000000
+Global Const $FILE_SHARE_READ = 0x00000001
+Global Const $FILE_SHARE_WRITE = 0x00000002
+Global Const $OPEN_EXISTING = 3
+Global Const $FSCTL_LOCK_VOLUME = 0x00090018
+Global Const $FSCTL_DISMOUNT_VOLUME = 0x00090020
+Global Const $IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808
 
-Global $g_hGui, $g_hChkEnabled, $g_hLog
+Global $g_hGui, $g_hBtnSelectSource, $g_hLblSource, $g_hChkEnabled, $g_hLog
 Global $g_bMonitoring = False, $g_bBatchPending = False
-Global $g_hBatchTimer = 0, $g_sKnownDrives = "|", $g_sSource = @ScriptDir & "\data"
+Global $g_hBatchTimer = 0, $g_sKnownDrives = "|", $g_sSource = ""
 Global $g_hPollTimer = TimerInit(), $g_sLastObservedDrives = "|"
 Global $g_sCopyError = ""
+Global $g_sLastSourceFolder = RegRead($REG_SETTINGS, "LastSourceFolder")
 
-$g_hGui = GUICreate("USB updater", 620, 350)
-$g_hChkEnabled = GUICtrlCreateCheckbox("Включить отслеживание новых съёмных накопителей", 10, 12, 360, 22)
-$g_hLog = GUICtrlCreateEdit("", 10, 45, 600, 295, BitOR($ES_MULTILINE, $WS_VSCROLL))
+If @error Or Not IsFolder($g_sLastSourceFolder) Then $g_sLastSourceFolder = @ScriptDir
+
+$g_hGui = GUICreate("USB updater", 620, 390)
+$g_hBtnSelectSource = GUICtrlCreateButton("Выбрать папку...", 10, 10, 140, 26)
+$g_hLblSource = GUICtrlCreateLabel("Источник не выбран", 160, 15, 450, 20)
+$g_hChkEnabled = GUICtrlCreateCheckbox("Включить отслеживание новых съёмных накопителей", 10, 45, 360, 22)
+GUICtrlSetState($g_hChkEnabled, $GUI_DISABLE)
+$g_hLog = GUICtrlCreateEdit("", 10, 78, 600, 302, BitOR($ES_MULTILINE, $WS_VSCROLL))
 GUICtrlSetFont($g_hLog, 9, 400, 0, "Consolas")
 GUICtrlSetBkColor($g_hLog, 0x000000)
 GUICtrlSetColor($g_hLog, 0xFFFFFF)
@@ -25,34 +38,42 @@ GUICtrlSetColor($g_hLog, 0xFFFFFF)
 GUIRegisterMsg($WM_DEVICECHANGE, "WM_DEVICECHANGE")
 GUISetState(@SW_SHOW)
 
-If Not EnsureSourceFolder() Then
-	MsgBox($MB_ICONERROR, "Ошибка", "Не удалось создать папку data:" & @CRLF & $g_sSource)
-	Exit
+If IsFolder($g_sLastSourceFolder) Then
+	$g_sSource = $g_sLastSourceFolder
+	GUICtrlSetData($g_hLblSource, $g_sSource)
+	GUICtrlSetState($g_hChkEnabled, $GUI_ENABLE)
+	AddLog("Восстановлен источник: " & $g_sSource)
+Else
+	AddLog("Выберите папку с данными для копирования.")
 EndIf
-AddLog("Готово. Источник: " & $g_sSource)
-AddLog("Включите отслеживание, затем подключите хаб с накопителями.")
 
 While 1
 	Local $iMsg = GUIGetMsg()
 	If $iMsg = $GUI_EVENT_CLOSE Then ExitLoop
 
+	If $iMsg = $g_hBtnSelectSource Then
+		SelectSourceFolder()
+	EndIf
+
 	If $iMsg = $g_hChkEnabled Then
 		$g_bMonitoring = (BitAND(GUICtrlRead($g_hChkEnabled), $GUI_CHECKED) = $GUI_CHECKED)
 		If $g_bMonitoring Then
-			If Not EnsureSourceFolder() Then
+			If Not IsSourceFolder() Then
 				$g_bMonitoring = False
 				GUICtrlSetState($g_hChkEnabled, $GUI_UNCHECKED)
-				MsgBox($MB_ICONERROR, "Нет данных", "Не удалось создать папку data:" & @CRLF & $g_sSource)
-				AddLog("ОШИБКА: папка data недоступна")
+				MsgBox($MB_ICONERROR, "Нет данных", "Сначала выберите существующую папку с данными.")
+				AddLog("ОШИБКА: источник не выбран или недоступен")
 			Else
 				; Existing drives are not touched. Only drives connected after enabling are processed.
 				$g_sKnownDrives = GetRemovableDrives()
 				$g_sLastObservedDrives = $g_sKnownDrives
 				$g_hPollTimer = TimerInit()
+				GUICtrlSetState($g_hBtnSelectSource, $GUI_DISABLE)
 				AddLog("Отслеживание включено. Подключите хаб с накопителями.")
 			EndIf
 		Else
 			$g_bBatchPending = False
+			GUICtrlSetState($g_hBtnSelectSource, $GUI_ENABLE)
 			AddLog("Отслеживание выключено.")
 		EndIf
 	EndIf
@@ -134,11 +155,10 @@ Func ProcessNewDrives()
 EndFunc
 
 Func GetRemovableDrives()
-	; Some USB sticks identify as FIXED. The baseline is captured on startup,
-	; therefore only newly mounted local volumes are ever processed.
+	; Some USB storage devices report unusual drive types. Compare every ready drive
+	; letter instead; the baseline ensures that only newly mounted volumes are processed.
 	Local $sResult = "|"
-	AddDriveTypeToList("REMOVABLE", $sResult)
-	AddDriveTypeToList("FIXED", $sResult)
+	AddDriveTypeToList("ALL", $sResult)
 	Return $sResult
 EndFunc
 
@@ -151,13 +171,24 @@ Func AddDriveTypeToList($sType, ByRef $sList)
 	Next
 EndFunc
 
-Func EnsureSourceFolder()
-	If FileExists($g_sSource) Then Return StringInStr(FileGetAttrib($g_sSource), "D") > 0
-	If DirCreate($g_sSource) Then
-		AddLog("Создана папка data: " & $g_sSource)
-		Return True
-	EndIf
-	Return False
+Func SelectSourceFolder()
+	Local $sSelected = FileSelectFolder("Выберите папку с данными для копирования", $g_sLastSourceFolder, 0, "", $g_hGui)
+	If @error Or $sSelected = "" Then Return
+
+	$g_sSource = $sSelected
+	$g_sLastSourceFolder = $sSelected
+	RegWrite($REG_SETTINGS, "LastSourceFolder", "REG_SZ", $g_sLastSourceFolder)
+	GUICtrlSetData($g_hLblSource, $g_sSource)
+	GUICtrlSetState($g_hChkEnabled, $GUI_ENABLE)
+	AddLog("Выбран источник: " & $g_sSource)
+EndFunc
+
+Func IsSourceFolder()
+	Return IsFolder($g_sSource)
+EndFunc
+
+Func IsFolder($sPath)
+	Return $sPath <> "" And FileExists($sPath) And StringInStr(FileGetAttrib($sPath), "D") > 0
 EndFunc
 
 Func CopyDataToDrive($sDrive)
@@ -213,20 +244,59 @@ Func DriveRoot($sDrive)
 EndFunc
 
 Func SafelyDismount($sDrive)
-	Return DismountWithMountvol($sDrive)
+	; Standard volume-control sequence: flush -> lock -> dismount -> eject media.
+	; Unlike mountvol /p it does not permanently take the volume offline.
+	Local $sDevicePath = "\\.\" & StringLeft($sDrive, 2)
+	Local $aOpen = DllCall("kernel32.dll", "handle", "CreateFileW", "wstr", $sDevicePath, "dword", BitOR($GENERIC_READ, $GENERIC_WRITE), "dword", BitOR($FILE_SHARE_READ, $FILE_SHARE_WRITE), "ptr", 0, "dword", $OPEN_EXISTING, "dword", 0, "ptr", 0)
+	If @error Or $aOpen[0] = Ptr(-1) Then
+		AddLog("ОШИБКА открытия тома " & $sDrive & " (код " & GetLastErrorCode() & ")")
+		Return False
+	EndIf
+
+	Local $hVolume = $aOpen[0], $iError = 0
+	Local $bSuccess = FlushVolumeBuffers($hVolume, $iError)
+	If $bSuccess Then $bSuccess = SendVolumeControl($hVolume, $FSCTL_LOCK_VOLUME, $iError)
+	If $bSuccess Then $bSuccess = SendVolumeControl($hVolume, $FSCTL_DISMOUNT_VOLUME, $iError)
+	If $bSuccess Then $bSuccess = SendVolumeControl($hVolume, $IOCTL_STORAGE_EJECT_MEDIA, $iError)
+	If Not $bSuccess Then
+		DllCall("kernel32.dll", "bool", "CloseHandle", "handle", $hVolume)
+		AddLog("ОШИБКА безопасного извлечения " & $sDrive & " (код " & $iError & ")")
+		Return False
+	EndIf
+	DllCall("kernel32.dll", "bool", "CloseHandle", "handle", $hVolume)
+
+	; The eject request is asynchronous. Wait briefly for the drive letter to disappear.
+	Local $i
+	For $i = 1 To 30
+		Sleep(100)
+		If DriveStatus($sDrive) <> "READY" Then
+			AddLog("Безопасно извлечён " & $sDrive)
+			Return True
+		EndIf
+	Next
+
+	AddLog("Носитель всё ещё используется: " & $sDrive)
+	Return False
 EndFunc
 
-Func DismountWithMountvol($sDrive)
-	; mountvol /p is the native, reliable way to detach the mounted volume:
-	; it flushes/dismounts the volume, removes its drive letter and prevents automount.
-	Local $sMountPoint = DriveRoot($sDrive)
-	Local $iExitCode = RunWait(@ComSpec & " /c mountvol " & $sMountPoint & " /p", "", @SW_HIDE)
-	If $iExitCode = 0 Then
-		AddLog("Том отключён через mountvol: " & $sDrive)
-		Return True
-	EndIf
-	AddLog("ОШИБКА mountvol для " & $sDrive & " (код " & $iExitCode & ")")
+Func FlushVolumeBuffers($hVolume, ByRef $iError)
+	Local $aCall = DllCall("kernel32.dll", "bool", "FlushFileBuffers", "handle", $hVolume)
+	If Not @error And $aCall[0] Then Return True
+	$iError = GetLastErrorCode()
 	Return False
+EndFunc
+
+Func SendVolumeControl($hVolume, $iControlCode, ByRef $iError)
+	Local $aCall = DllCall("kernel32.dll", "bool", "DeviceIoControl", "handle", $hVolume, "dword", $iControlCode, "ptr", 0, "dword", 0, "ptr", 0, "dword", 0, "dword*", 0, "ptr", 0)
+	If Not @error And $aCall[0] Then Return True
+	$iError = GetLastErrorCode()
+	Return False
+EndFunc
+
+Func GetLastErrorCode()
+	Local $aCall = DllCall("kernel32.dll", "dword", "GetLastError")
+	If @error Then Return -1
+	Return $aCall[0]
 EndFunc
 
 Func _FileErrorText($iError)
