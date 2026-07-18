@@ -1,1 +1,4 @@
 *.exe
+*.a3x
+*.tok
+dist/

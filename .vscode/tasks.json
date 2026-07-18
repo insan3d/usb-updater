@@ -2,30 +2,58 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Run AutoIt script",
+      "label": "Check updater syntax",
       "type": "shell",
-      "command": "$script = '${workspaceFolder}/script.au3'; & 'C:/Program Files (x86)/AutoIt3/AutoIt3.exe' \"$script\"",
+      "command": "$gui = '${workspaceFolder}/updater_gui.au3'; $worker = '${workspaceFolder}/updater_worker.au3'; & 'C:/Program Files (x86)/AutoIt3/Au3Check.exe' \"$gui\"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & 'C:/Program Files (x86)/AutoIt3/Au3Check.exe' \"$worker\"; exit $LASTEXITCODE",
       "options": {
         "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
     },
     {
-      "label": "Check Au3 syntax",
+      "label": "Run USB updater GUI",
       "type": "shell",
-      "command": "$script = '${workspaceFolder}/script.au3'; & 'C:/Program Files (x86)/AutoIt3/Au3Check.exe' \"$script\"",
+      "command": "$script = '${workspaceFolder}/updater_gui.au3'; & 'C:/Program Files (x86)/AutoIt3/AutoIt3.exe' \"$script\"",
       "options": {
         "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
     },
     {
-      "label": "Build usb-updater.exe (x86)",
+      "label": "Build updater GUI (x86)",
       "type": "shell",
-      "command": "$script = '${workspaceFolder}/script.au3'; $output = '${workspaceFolder}/usb-updater.exe'; & 'C:/Program Files (x86)/AutoIt3/Aut2Exe/Aut2exe.exe' /in $script /out $output /x86",
+      "command": "$script = '${workspaceFolder}/updater_gui.au3'; $output = '${workspaceFolder}/usb-updater.exe'; $p = Start-Process -FilePath 'C:/Program Files (x86)/AutoIt3/Aut2Exe/Aut2exe.exe' -ArgumentList @('/in', $script, '/out', $output, '/x86', '/gui') -Wait -PassThru; exit $p.ExitCode",
       "options": {
         "cwd": "${workspaceFolder}"
       },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build updater worker (x86)",
+      "type": "shell",
+      "command": "$script = '${workspaceFolder}/updater_worker.au3'; $output = '${workspaceFolder}/updater_worker.exe'; $p = Start-Process -FilePath 'C:/Program Files (x86)/AutoIt3/Aut2Exe/Aut2exe.exe' -ArgumentList @('/in', $script, '/out', $output, '/x86', '/console') -Wait -PassThru; exit $p.ExitCode",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Inno Setup installer",
+      "type": "shell",
+      "command": "& 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' '${workspaceFolder}/installer.iss'; exit $LASTEXITCODE",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build release installer",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Build updater GUI (x86)",
+        "Build updater worker (x86)",
+        "Build Inno Setup installer"
+      ],
       "problemMatcher": []
     }
   ]
