@@ -4,7 +4,7 @@
 #pragma compile(FileVersion, "1.1.0.0")
 #pragma compile(FileDescription, "USB updater worker")
 #pragma compile(InternalName, "updater-worker")
-#pragma compile(OriginalFilename, "updater_worker.exe")
+#pragma compile(OriginalFilename, "usb-updater-worker.exe")
 #pragma compile(ExecutionLevel, "asInvoker")
 #pragma compile(Icon, "icon.ico")
 
@@ -12,6 +12,7 @@
 
 Opt("MustDeclareVars", 1)
 
+; Windows volume-control constants and retry policy.
 Global Const $FSCTL_LOCK_VOLUME = 0x00090018
 Global Const $FSCTL_DISMOUNT_VOLUME = 0x00090020
 Global Const $IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808
@@ -19,11 +20,13 @@ Global Const $LOCK_RETRY_COUNT = 6
 Global Const $LOCK_RETRY_DELAY_MS = 500
 Global Const $ERROR_ALREADY_EXISTS = 183
 
+; Per-process state.
 Global $g_sCopyError = ""
 Global $g_hDriveMutex = 0
 
 Main()
 
+; Validate input, prevent concurrent processing of one drive, copy and eject.
 Func Main()
 	Local $sDrive = GetArgument("/drive")
 	Local $sSource = GetArgument("/source")
@@ -33,7 +36,8 @@ Func Main()
 	If Not AcquireDriveMutex($sDrive) Then FailAndExit("Этот накопитель уже обрабатывается другим окном программы", 15)
 
 	Emit("STATE|COPYING")
-	Emit("LOG|Начата запись на " & $sDrive)
+	Emit("LOG|начата запись на " & $sDrive)
+
 	If Not _Crypt_Startup() Then FailAndExit("Не удалось запустить проверку SHA-256", 12)
 
 	If Not CopyFolderContents($sSource, DriveRoot($sDrive), "") Then
@@ -43,7 +47,7 @@ Func Main()
 	_Crypt_Shutdown()
 
 	Emit("STATE|EJECTING")
-	Emit("LOG|Запись и проверка завершены")
+	Emit("LOG|запись и проверка завершены")
 	Local $sEjectFailure = ""
 	If Not SafelyDismount($sDrive, $sEjectFailure) Then FailAndExit($sEjectFailure, 14)
 
@@ -52,6 +56,7 @@ Func Main()
 	Exit 0
 EndFunc
 
+; One worker per target letter, including workers from another GUI instance.
 Func AcquireDriveMutex($sDrive)
 	Local $sName = "Local\insan3d.usb-updater.drive-" & StringLeft($sDrive, 1)
 	Local $aCall = DllCall("kernel32.dll", "handle", "CreateMutexW", "ptr", 0, "bool", True, "wstr", $sName)
@@ -66,6 +71,7 @@ Func AcquireDriveMutex($sDrive)
 	Return True
 EndFunc
 
+; Release the mutex on every normal or handled error path.
 Func ReleaseDriveMutex()
 	If $g_hDriveMutex = 0 Then Return
 	DllCall("kernel32.dll", "bool", "ReleaseMutex", "handle", $g_hDriveMutex)
@@ -73,6 +79,7 @@ Func ReleaseDriveMutex()
 	$g_hDriveMutex = 0
 EndFunc
 
+; Command-line parsing.
 Func GetArgument($sName)
 	Local $i
 	For $i = 1 To $CmdLine[0] - 1
@@ -81,6 +88,7 @@ Func GetArgument($sName)
 	Return ""
 EndFunc
 
+; Recursive copy with a SHA-256 check after every file.
 Func CopyFolderContents($sSource, $sDestination, $sRelative)
 	If Not FileExists($sDestination) And Not DirCreate($sDestination) Then
 		$g_sCopyError = "Не удалось создать папку назначения"
@@ -112,6 +120,7 @@ Func CopyFolderContents($sSource, $sDestination, $sRelative)
 				FileClose($hSearch)
 				Return False
 			EndIf
+
 			If Not VerifyFile($sSourcePath, $sDestinationPath) Then
 				$g_sCopyError = "Ошибка проверки SHA-256: " & SafeEventText($sChildRelative)
 				FileClose($hSearch)
@@ -119,6 +128,7 @@ Func CopyFolderContents($sSource, $sDestination, $sRelative)
 			EndIf
 		EndIf
 	WEnd
+
 	FileClose($hSearch)
 	Return True
 EndFunc
@@ -126,17 +136,22 @@ EndFunc
 Func VerifyFile($sSourcePath, $sDestinationPath)
 	Local $bSourceHash = _Crypt_HashFile($sSourcePath, $CALG_SHA_256)
 	If @error Then Return False
+
 	Local $bDestinationHash = _Crypt_HashFile($sDestinationPath, $CALG_SHA_256)
 	If @error Then Return False
+
 	Return $bSourceHash = $bDestinationHash
 EndFunc
 
+; Flush, lock, dismount and eject the completed target volume.
 Func SafelyDismount($sDrive, ByRef $sFailure)
 	Local $sDevicePath = "\\.\" & StringLeft($sDrive, 2), $aOpen, $iDllError
 	Local $hVolume, $iError = 0, $iAttempt, $sStage = ""
+
 	For $iAttempt = 1 To $LOCK_RETRY_COUNT
 		$aOpen = DllCall("kernel32.dll", "handle", "CreateFileW", "wstr", $sDevicePath, "dword", BitOR($GENERIC_READ, $GENERIC_WRITE), "dword", BitOR($FILE_SHARE_READ, $FILE_SHARE_WRITE), "ptr", 0, "dword", $OPEN_EXISTING, "dword", 0, "ptr", 0)
 		$iDllError = @error
+
 		If $iDllError Then
 			$sFailure = "CreateFileW для " & $sDrive & ": ошибка DllCall " & $iDllError & " после " & $iAttempt & " попыток"
 			If $iAttempt = $LOCK_RETRY_COUNT Then Return False
@@ -160,6 +175,7 @@ Func SafelyDismount($sDrive, ByRef $sFailure)
 				DllCall("kernel32.dll", "bool", "CloseHandle", "handle", $hVolume)
 				ExitLoop
 			EndIf
+
 			DllCall("kernel32.dll", "bool", "CloseHandle", "handle", $hVolume)
 		EndIf
 
@@ -172,10 +188,11 @@ Func SafelyDismount($sDrive, ByRef $sFailure)
 	For $i = 1 To 30
 		Sleep(100)
 		If DriveStatus($sDrive) <> "READY" Then
-			Emit("LOG|Накопитель безопасно извлечён")
+			Emit("LOG|накопитель безопасно извлечён")
 			Return True
 		EndIf
 	Next
+
 	$sFailure = "IOCTL_STORAGE_EJECT_MEDIA выполнен, но " & $sDrive & " остаётся " & DriveStatus($sDrive) & " спустя 3 секунды"
 	Return False
 EndFunc
@@ -194,6 +211,7 @@ Func SendVolumeControl($hVolume, $iControlCode, ByRef $iError)
 	Return False
 EndFunc
 
+; Windows and path helpers.
 Func GetLastErrorCode()
 	Local $aCall = DllCall("kernel32.dll", "dword", "GetLastError")
 	If @error Then Return -1
@@ -218,6 +236,7 @@ Func SafeEventText($sText)
 	Return StringReplace($sText, @LF, " ")
 EndFunc
 
+; Line-based protocol consumed by the GUI.
 Func Emit($sLine)
 	ConsoleWrite($sLine & @LF)
 EndFunc
