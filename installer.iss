@@ -1,7 +1,7 @@
 ; USB Updater installer. Build with Inno Setup 6 (ISCC.exe installer.iss).
 
 #define AppName "USB Updater"
-#define AppVersion "1.1.0"
+#define AppVersion "1.2.0"
 #define AppPublisher "insan3d"
 #define AppExeName "usb-updater.exe"
 

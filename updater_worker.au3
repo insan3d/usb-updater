@@ -1,7 +1,7 @@
 #pragma compile(CompanyName, "insan3d")
 #pragma compile(ProductName, "USB updater")
-#pragma compile(ProductVersion, "1.1.0.0")
-#pragma compile(FileVersion, "1.1.0.0")
+#pragma compile(ProductVersion, "1.2.0.0")
+#pragma compile(FileVersion, "1.2.0.0")
 #pragma compile(FileDescription, "USB updater worker")
 #pragma compile(InternalName, "updater-worker")
 #pragma compile(OriginalFilename, "usb-updater-worker.exe")
@@ -23,8 +23,15 @@ Global Const $ERROR_ALREADY_EXISTS = 183
 ; Per-process state.
 Global $g_sCopyError = ""
 Global $g_hDriveMutex = 0
+Global $g_iFilesCopied = 0
 
 Main()
+
+Func OnManifestFileHashed($iFileCount)
+	Emit("VERIFY_PROGRESS|" & $iFileCount)
+EndFunc
+
+#include "manifest.au3"
 
 ; Validate input, prevent concurrent processing of one drive, copy and eject.
 Func Main()
@@ -44,14 +51,28 @@ Func Main()
 		_Crypt_Shutdown()
 		FailAndExit($g_sCopyError, 13)
 	EndIf
+
+	Emit("STATE|VERIFYING")
+	Emit("LOG|проверка записанных файлов")
+
+	Local $bHashSuccess = True
+	Local $sManifestFailure = "", $iManifestFiles = 0
+	Local $sManifest = BuildManifest($sSource, DriveRoot($sDrive), "", $bHashSuccess, $sManifestFailure, $iManifestFiles)
+	Local $bContentHash = 0
+
+	If $bHashSuccess Then $bContentHash = _Crypt_HashData($sManifest, $CALG_SHA_256)
+	Local $bHashFailed = @error Or Not IsBinary($bContentHash) Or BinaryLen($bContentHash) = 0
 	_Crypt_Shutdown()
+
+	If Not $bHashSuccess Or $bHashFailed Then FailAndExit("Не удалось вычислить контрольную сумму устройства", 13)
+	Local $sContentHash = StringLower(Hex($bContentHash))
 
 	Emit("STATE|EJECTING")
 	Emit("LOG|запись и проверка завершены")
 	Local $sEjectFailure = ""
 	If Not SafelyDismount($sDrive, $sEjectFailure) Then FailAndExit($sEjectFailure, 14)
 
-	Emit("RESULT|OK")
+	Emit("RESULT|HASH:" & $sContentHash)
 	ReleaseDriveMutex()
 	Exit 0
 EndFunc
@@ -68,6 +89,7 @@ Func AcquireDriveMutex($sDrive)
 		$g_hDriveMutex = 0
 		Return False
 	EndIf
+
 	Return True
 EndFunc
 
@@ -85,10 +107,11 @@ Func GetArgument($sName)
 	For $i = 1 To $CmdLine[0] - 1
 		If StringLower($CmdLine[$i]) = StringLower($sName) Then Return $CmdLine[$i + 1]
 	Next
+
 	Return ""
 EndFunc
 
-; Recursive copy with a SHA-256 check after every file.
+; Recursive copy. Verification runs once over the completed target tree.
 Func CopyFolderContents($sSource, $sDestination, $sRelative)
 	If Not FileExists($sDestination) And Not DirCreate($sDestination) Then
 		$g_sCopyError = "Не удалось создать папку назначения"
@@ -121,26 +144,14 @@ Func CopyFolderContents($sSource, $sDestination, $sRelative)
 				Return False
 			EndIf
 
-			If Not VerifyFile($sSourcePath, $sDestinationPath) Then
-				$g_sCopyError = "Ошибка проверки SHA-256: " & SafeEventText($sChildRelative)
-				FileClose($hSearch)
-				Return False
-			EndIf
+			$g_iFilesCopied += 1
+			Emit("PROGRESS|" & $g_iFilesCopied)
+
 		EndIf
 	WEnd
 
 	FileClose($hSearch)
 	Return True
-EndFunc
-
-Func VerifyFile($sSourcePath, $sDestinationPath)
-	Local $bSourceHash = _Crypt_HashFile($sSourcePath, $CALG_SHA_256)
-	If @error Then Return False
-
-	Local $bDestinationHash = _Crypt_HashFile($sDestinationPath, $CALG_SHA_256)
-	If @error Then Return False
-
-	Return $bSourceHash = $bDestinationHash
 EndFunc
 
 ; Flush, lock, dismount and eject the completed target volume.
@@ -158,6 +169,7 @@ Func SafelyDismount($sDrive, ByRef $sFailure)
 			Sleep($LOCK_RETRY_DELAY_MS)
 			ContinueLoop
 		EndIf
+
 		If $aOpen[0] = Ptr(-1) Then
 			$iError = GetLastErrorCode()
 			$sStage = "CreateFileW"

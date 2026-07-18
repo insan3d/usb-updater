@@ -2,3 +2,4 @@
 *.a3x
 *.tok
 dist/
+data/

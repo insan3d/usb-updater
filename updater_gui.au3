@@ -1,7 +1,7 @@
 #pragma compile(CompanyName, "insan3d")
 #pragma compile(ProductName, "USB updater")
-#pragma compile(ProductVersion, "1.1.0.0")
-#pragma compile(FileVersion, "1.1.0.0")
+#pragma compile(ProductVersion, "1.2.0.0")
+#pragma compile(FileVersion, "1.2.0.0")
 #pragma compile(FileDescription, "USB updater")
 #pragma compile(InternalName, "usb-updater")
 #pragma compile(OriginalFilename, "usb-updater.exe")
@@ -10,46 +10,16 @@
 
 #include <AutoItConstants.au3>
 #include <ButtonConstants.au3>
+#include <Crypt.au3>
 #include <GUIConstantsEx.au3>
 #include <EditConstants.au3>
 #include <GuiStatusBar.au3>
 #include <MsgBoxConstants.au3>
 #include <StaticConstants.au3>
 #include <WindowsConstants.au3>
+#include "app_state.au3"
 
 Opt("MustDeclareVars", 1)
-
-; Layout and timing.
-Global Const $WINDOW_WIDTH = 760
-Global Const $WINDOW_HEIGHT = 560
-Global Const $DEFAULT_SLOT_COUNT = 8
-Global Const $MAX_SLOT_COUNT = 16
-Global Const $SLOTS_PER_ROW = 8
-Global Const $SLOT_WIDTH = 86
-Global Const $SLOT_GAP = 7
-Global Const $SLOT_LEFT = 10
-Global Const $SLOT_TOP = 50
-Global Const $SLOT_ROW_HEIGHT = 95
-Global Const $FALLBACK_SCAN_INTERVAL_MS = 1500
-Global Const $WORKER_OUTPUT_INTERVAL_MS = 100
-Global Const $DEVICE_SETTLE_MS = 600
-Global Const $REG_SETTINGS = "HKCU\Software\insan3d\usb-updater"
-Global Const $DRIVE_OPTIONS = "--|D:|E:|F:|G:|H:|I:|J:|K:|L:|M:|N:|O:|P:|Q:|R:|S:|T:|U:|V:|W:|X:|Y:|Z:"
-
-; Slot lifecycle.
-Global Const $SLOT_EMPTY = "EMPTY"
-Global Const $SLOT_WORKING = "WORKING"
-Global Const $SLOT_EJECTING = "EJECTING"
-Global Const $SLOT_WAIT_EJECT = "WAIT_EJECT"
-Global Const $SLOT_ERROR = "ERROR"
-
-; GUI controls and application state.
-Global $g_hGui, $g_hBtnSource, $g_hLblSource, $g_hCmbSlotCount, $g_hBtnMonitoring
-Global $g_hStatusBar, $g_hLog, $g_sSource = "", $g_bMonitoring = False, $g_iSlotCount = $DEFAULT_SLOT_COUNT
-Global $g_hPollTimer = TimerInit(), $g_hWorkerTimer = TimerInit(), $g_hDeviceTimer = TimerInit()
-Global $g_bScanRequested = True, $g_bDeviceChangePending = False, $g_bUiDirty = False
-Global $g_aSlotDrive[1], $g_aSlotState[1], $g_aSlotIndicator[1]
-Global $g_aSlotStatus[1], $g_aSlotPid[1], $g_aSlotBuffer[1], $g_aSlotResult[1]
 
 ; Initialise the window and process GUI, device and worker events.
 CreateGui()
@@ -99,10 +69,12 @@ Func CreateGui()
 	GUICtrlSetColor($g_hLblSource, 0x555555)
 	GUICtrlCreateLabel("Порты:", 500, 15, 42, 20)
 
-	$g_hCmbSlotCount = GUICtrlCreateCombo("", 542, 11, 48, 24)
-	GUICtrlSetData($g_hCmbSlotCount, "1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16", $g_iSlotCount)
+	$g_hBtnSettings = GUICtrlCreateButton("Настройки", 490, 10, 105, 28)
 
 	$g_hBtnMonitoring = GUICtrlCreateCheckbox("Мониторинг", 595, 10, 150, 28, BitOR($BS_AUTOCHECKBOX, $BS_PUSHLIKE))
+
+	GUICtrlDelete($g_hBtnSettings)
+	$g_hBtnSettings = GUICtrlCreateButton("Настройки", 490, 10, 105, 28)
 
 	CreateSlots()
 	CreateLogControls("")
@@ -125,6 +97,7 @@ Func CreateSlots()
 	ReDim $g_aSlotPid[$g_iSlotCount]
 	ReDim $g_aSlotBuffer[$g_iSlotCount]
 	ReDim $g_aSlotResult[$g_iSlotCount]
+	ReDim $g_aSlotProgress[$g_iSlotCount]
 
 	For $i = 0 To $g_iSlotCount - 1
 		CreateSlotControls($i, GetSavedSlotDrive($i))
@@ -145,8 +118,7 @@ Func CreateSlotControls($iSlot, $sDrive)
 	Local $iX = $SLOT_LEFT + Mod($iSlot, $SLOTS_PER_ROW) * ($SLOT_WIDTH + $SLOT_GAP)
 	Local $iTop = GetSlotTop($iSlot)
 
-	$g_aSlotDrive[$iSlot] = GUICtrlCreateCombo("", $iX, $iTop, $SLOT_WIDTH, 24)
-	GUICtrlSetData($g_aSlotDrive[$iSlot], $DRIVE_OPTIONS, $sDrive)
+	$g_aSlotDrive[$iSlot] = GUICtrlCreateLabel($sDrive, $iX, $iTop + 3, $SLOT_WIDTH, 20, $SS_CENTER)
 
 	$g_aSlotState[$iSlot] = GUICtrlCreateLabel("", $iX, $iTop + 39, $SLOT_WIDTH, 18, $SS_CENTER)
 	$g_aSlotIndicator[$iSlot] = GUICtrlCreateLabel("", $iX, $iTop + 68, $SLOT_WIDTH, 9)
@@ -157,6 +129,7 @@ Func ResetSlotRuntimeState($iSlot)
 	$g_aSlotPid[$iSlot] = 0
 	$g_aSlotBuffer[$iSlot] = ""
 	$g_aSlotResult[$iSlot] = ""
+	$g_aSlotProgress[$iSlot] = 0
 	SetSlotStatus($iSlot, $SLOT_EMPTY)
 EndFunc
 
@@ -190,17 +163,14 @@ Func HandleGuiEvent($iMsg)
 		Return
 	EndIf
 
-	If $iMsg = $g_hCmbSlotCount Then
-		ChangeSlotCount()
+	If $iMsg = $g_hBtnSettings Then
+		ShowSettingsDialog()
 		Return
 	EndIf
-
-	SaveSlotLetter($iMsg)
 EndFunc
 
 ; Recreate slot controls only while monitoring is off and no worker is active.
-Func ChangeSlotCount()
-	Local $iNewCount = Number(GUICtrlRead($g_hCmbSlotCount))
+Func ApplySlotCount($iNewCount)
 	If $iNewCount < 1 Or $iNewCount > $MAX_SLOT_COUNT Or $iNewCount = $g_iSlotCount Then Return
 
 	Local $sLog = GUICtrlRead($g_hLog)
@@ -225,6 +195,109 @@ Func DeleteSlotControls()
 		GUICtrlDelete($g_aSlotState[$i])
 		GUICtrlDelete($g_aSlotIndicator[$i])
 	Next
+EndFunc
+
+Func LegacyShowSettingsDialog()
+	If $g_bMonitoring Or HasActiveWorker() Then Return
+
+	Local $hDialog = GUICreate("Настройки", 430, 355, -1, -1, -1, -1, $g_hGui)
+	GUICtrlCreateLabel("Количество слотов:", 15, 18, 105, 20)
+
+	Local $hSlotCount = GUICtrlCreateCombo("", 125, 14, 55, 24)
+	GUICtrlSetData($hSlotCount, "1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16", $g_iSlotCount)
+	GUICtrlCreateLabel("Буквы устройств:", 15, 53, 130, 20)
+
+	Local $aDriveControls[$MAX_SLOT_COUNT], $i, $iColumn, $iRow, $iX, $iY
+	For $i = 0 To $MAX_SLOT_COUNT - 1
+		$iColumn = Int($i / 8)
+		$iRow = Mod($i, 8)
+		$iX = 15 + $iColumn * 200
+		$iY = 77 + $iRow * 25
+
+		GUICtrlCreateLabel("Слот " & ($i + 1) & ":", $iX, $iY + 3, 48, 18)
+		$aDriveControls[$i] = GUICtrlCreateCombo("", $iX + 52, $iY, 72, 22)
+
+		If $i < UBound($g_aSlotDrive) Then
+			GUICtrlSetData($aDriveControls[$i], $DRIVE_OPTIONS, GetSlotDrive($i))
+		Else
+			GUICtrlSetData($aDriveControls[$i], $DRIVE_OPTIONS, GetSavedSlotDrive($i))
+		EndIf
+
+		If $i >= $g_iSlotCount Then GUICtrlSetState($aDriveControls[$i], $GUI_DISABLE)
+	Next
+
+	Local $hProject = GUICtrlCreateLabel("github.com/insan3d/usb-updater", 15, 320, 235, 20, $SS_NOTIFY)
+	GUICtrlSetColor($hProject, 0x0066CC)
+
+	Local $hSave = GUICtrlCreateButton("Сохранить", 260, 316, 75, 26)
+	Local $hCancel = GUICtrlCreateButton("Отмена", 340, 316, 75, 26)
+	GUISetState(@SW_SHOW, $hDialog)
+
+	While True
+		Local $iMsg = GUIGetMsg(1)
+		If $iMsg[0] = 0 Then ContinueLoop
+		If $iMsg[1] <> $hDialog Then ContinueLoop
+		If $iMsg[0] = $GUI_EVENT_CLOSE Or $iMsg[0] = $hCancel Then ExitLoop
+
+			If $iMsg[0] = $hProject Then
+			ShellExecute("https://github.com/insan3d/usb-updater")
+			ContinueLoop
+		EndIf
+
+		If $iMsg[0] = $hSlotCount Then
+			LegacyUpdateSettingsSlotControls($aDriveControls, Number(GUICtrlRead($hSlotCount)))
+			ContinueLoop
+		EndIf
+
+		If $iMsg[0] = $hSave Then
+			If LegacySaveSettings($hSlotCount, $aDriveControls) Then ExitLoop
+		EndIf
+	WEnd
+
+	GUIDelete($hDialog)
+EndFunc
+
+Func LegacyUpdateSettingsSlotControls(ByRef $aDriveControls, $iSlotCount)
+	Local $i
+	For $i = 0 To $MAX_SLOT_COUNT - 1
+		If $i < $iSlotCount Then
+			GUICtrlSetState($aDriveControls[$i], $GUI_ENABLE)
+		Else
+			GUICtrlSetState($aDriveControls[$i], $GUI_DISABLE)
+		EndIf
+	Next
+EndFunc
+
+Func LegacySaveSettings($hSlotCount, ByRef $aDriveControls)
+	Local $iNewSlotCount = Number(GUICtrlRead($hSlotCount))
+
+	Local $i, $j, $sDrive
+	For $i = 0 To $iNewSlotCount - 1
+		$sDrive = GUICtrlRead($aDriveControls[$i])
+		If Not IsConfiguredDrive($sDrive) Or $sDrive = "--" Then
+			MsgBox($MB_ICONERROR, "Настройки", "Выберите букву для каждого слота.")
+			Return False
+		EndIf
+
+		For $j = $i + 1 To $iNewSlotCount - 1
+			If $sDrive = GUICtrlRead($aDriveControls[$j]) Then
+				MsgBox($MB_ICONERROR, "Настройки", "Одна и та же буква выбрана для нескольких слотов.")
+				Return False
+			EndIf
+		Next
+	Next
+
+	For $i = 0 To $iNewSlotCount - 1
+		RegWrite($REG_SETTINGS, "Slot" & ($i + 1) & "Drive", "REG_SZ", GUICtrlRead($aDriveControls[$i]))
+	Next
+
+	ApplySlotCount($iNewSlotCount)
+	For $i = 0 To $g_iSlotCount - 1
+		GUICtrlSetData($g_aSlotDrive[$i], GetSavedSlotDrive($i))
+	Next
+
+	AddLog("Настройки сохранены")
+	Return True
 EndFunc
 
 ; Source folder selection and persistence.
@@ -255,11 +328,18 @@ Func SetMonitoring($bEnabled)
 			Return
 		EndIf
 
+		If Not BuildExpectedContentHash() Then
+			MsgBox($MB_ICONERROR, "Ошибка проверки", "Не удалось подготовить контрольную сумму файлов обновления." & @CRLF & $g_sHashError)
+			GUICtrlSetState($g_hBtnMonitoring, $GUI_UNCHECKED)
+			Return
+		EndIf
+
 		$g_bMonitoring = True
 		$g_bScanRequested = True
 		AddLog("Мониторинг включён")
 	Else
 		$g_bMonitoring = False
+		$g_sExpectedContentHash = ""
 		AddLog("Мониторинг выключен: новые накопители не запускаются")
 	EndIf
 
@@ -288,10 +368,38 @@ Func ValidateSlotConfiguration()
 	Return True
 EndFunc
 
+; Hash source files once per monitoring session. Workers return the matching target hash.
+Func BuildExpectedContentHash()
+	$g_sHashError = ""
+	$g_iSourceFileCount = 0
+
+	AddLog("Подготовка контрольных сумм файлов обновления...")
+
+	If Not _Crypt_Startup() Then Return False
+
+	Local $bSuccess = True
+	Local $sManifest = BuildManifest($g_sSource, $g_sSource, "", $bSuccess, $g_sHashError, $g_iSourceFileCount)
+	Local $bHash = 0
+	If $bSuccess Then $bHash = _Crypt_HashData($sManifest, $CALG_SHA_256)
+
+	Local $iHashError = @error
+	Local $bHashFailed = $iHashError <> 0 Or Not IsBinary($bHash) Or BinaryLen($bHash) = 0
+	_Crypt_Shutdown()
+
+	If Not $bSuccess Or $bHashFailed Then
+		If $g_sHashError = "" Then $g_sHashError = "Код ошибки: " & $iHashError
+		Return False
+	EndIf
+
+	$g_sExpectedContentHash = StringLower(Hex($bHash))
+	AddLog("Контрольная сумма файлов обновления подготовлена")
+	Return True
+EndFunc
+
 ; Scan configured letters and launch workers for newly ready targets.
 Func PollSlots()
 	Local $i, $sDrive, $bReady
-	For $i = 0 To $g_iSlotCount - 1
+	For $i = 0 To UBound($g_aSlotStatus) - 1
 		$sDrive = GetSlotDrive($i)
 		If $sDrive = "--" Then ContinueLoop
 		$bReady = DriveStatus($sDrive) = "READY"
@@ -314,6 +422,7 @@ EndFunc
 
 ; Worker process lifecycle and stdout protocol.
 Func StartWorker($iSlot)
+	If $iSlot < 0 Or $iSlot >= UBound($g_aSlotPid) Then Return
 	Local $sWorker = @ScriptDir & "\usb-updater-worker.exe"
 	Local $sDrive = GetSlotDrive($iSlot)
 
@@ -335,6 +444,7 @@ Func StartWorker($iSlot)
 	$g_aSlotPid[$iSlot] = $iPid
 	$g_aSlotBuffer[$iSlot] = ""
 	$g_aSlotResult[$iSlot] = ""
+	$g_aSlotProgress[$iSlot] = 0
 
 	SetSlotStatus($iSlot, $SLOT_WORKING)
 	AddLog($sDrive & " накопитель обнаружен, начата обработка")
@@ -342,7 +452,7 @@ EndFunc
 
 Func ReadWorkerOutputs()
 	Local $i, $sRead
-	For $i = 0 To $g_iSlotCount - 1
+	For $i = 0 To UBound($g_aSlotPid) - 1
 		If $g_aSlotPid[$i] = 0 Then ContinueLoop
 
 		$sRead = StdoutRead($g_aSlotPid[$i])
@@ -380,10 +490,17 @@ Func ProcessWorkerLine($iSlot, $sLine)
 	Switch $sType
 		Case "STATE"
 			If $sValue = "COPYING" Then SetSlotStatus($iSlot, $SLOT_WORKING)
+			If $sValue = "VERIFYING" Then SetSlotStatus($iSlot, $SLOT_VERIFYING)
 			If $sValue = "EJECTING" Then SetSlotStatus($iSlot, $SLOT_EJECTING)
 
 		Case "LOG"
 			AddLog($sDrive & " " & $sValue)
+
+		Case "PROGRESS"
+			SetSlotProgress($iSlot, Number($sValue))
+
+		Case "VERIFY_PROGRESS"
+			SetSlotVerificationProgress($iSlot, Number($sValue))
 
 		Case "RESULT"
 			$g_aSlotResult[$iSlot] = $sValue
@@ -400,11 +517,12 @@ Func FinishWorker($iSlot)
 	Local $sDrive = GetSlotDrive($iSlot)
 	$g_aSlotPid[$iSlot] = 0
 
-	If $g_aSlotResult[$iSlot] = "OK" Then
+	If $g_aSlotResult[$iSlot] = "HASH:" & $g_sExpectedContentHash Then
 		SetSlotStatus($iSlot, $SLOT_WAIT_EJECT)
 		AddLog($sDrive & " готово, носитель можно заменить")
 	Else
 		SetSlotStatus($iSlot, $SLOT_ERROR)
+		If StringLeft($g_aSlotResult[$iSlot], 5) = "HASH:" Then AddLog($sDrive & " контрольная сумма не совпала, вставьте устройство повторно")
 		If $g_aSlotResult[$iSlot] = "" Then AddLog($sDrive & " обработчик завершился без результата")
 	EndIf
 EndFunc
@@ -412,6 +530,8 @@ EndFunc
 ; Slot display and persisted configuration.
 Func SetSlotStatus($iSlot, $sStatus)
 	$g_aSlotStatus[$iSlot] = $sStatus
+	Local $iX = $SLOT_LEFT + Mod($iSlot, $SLOTS_PER_ROW) * ($SLOT_WIDTH + $SLOT_GAP)
+	GUICtrlSetPos($g_aSlotIndicator[$iSlot], $iX, GetSlotTop($iSlot) + 68, $SLOT_WIDTH, 9)
 
 	Switch $sStatus
 		Case $SLOT_EMPTY
@@ -420,9 +540,19 @@ Func SetSlotStatus($iSlot, $sStatus)
 			GUICtrlSetBkColor($g_aSlotIndicator[$iSlot], 0xB8B8B8)
 
 		Case $SLOT_WORKING
+			GUICtrlSetData($g_aSlotState[$iSlot], "ЗАПИСЬ 0%")
+			GUICtrlSetPos($g_aSlotIndicator[$iSlot], $iX, GetSlotTop($iSlot) + 68, 1, 9)
 			GUICtrlSetData($g_aSlotState[$iSlot], "ЗАПИСЬ")
 			GUICtrlSetColor($g_aSlotState[$iSlot], 0x1E5B9B)
+			GUICtrlSetData($g_aSlotState[$iSlot], "ЗАПИСЬ 0%")
 			GUICtrlSetBkColor($g_aSlotIndicator[$iSlot], 0x3B82C4)
+
+		Case $SLOT_VERIFYING
+			GUICtrlSetPos($g_aSlotIndicator[$iSlot], $iX, GetSlotTop($iSlot) + 68, 1, 9)
+			GUICtrlSetData($g_aSlotState[$iSlot], "ПРОВЕРКА")
+			GUICtrlSetColor($g_aSlotState[$iSlot], 0x6A4A00)
+			GUICtrlSetData($g_aSlotState[$iSlot], "ПРОВЕРКА 0%")
+			GUICtrlSetBkColor($g_aSlotIndicator[$iSlot], 0xE0A11B)
 
 		Case $SLOT_EJECTING
 			GUICtrlSetData($g_aSlotState[$iSlot], "ИЗВЛЕЧЕНИЕ")
@@ -443,14 +573,38 @@ Func SetSlotStatus($iSlot, $sStatus)
 	$g_bUiDirty = True
 EndFunc
 
-Func SaveSlotLetter($iControl)
-	Local $i
-	For $i = 0 To $g_iSlotCount - 1
-		If $iControl = $g_aSlotDrive[$i] Then
-			RegWrite($REG_SETTINGS, "Slot" & ($i + 1) & "Drive", "REG_SZ", GetSlotDrive($i))
-			Return
-		EndIf
-	Next
+Func SetSlotProgress($iSlot, $iCompletedFiles)
+	If $g_iSourceFileCount <= 0 Then Return
+
+	$g_aSlotProgress[$iSlot] = $iCompletedFiles
+	Local $iPercent = Int($iCompletedFiles * 100 / $g_iSourceFileCount)
+	If $iPercent > 100 Then $iPercent = 100
+
+	Local $iX = $SLOT_LEFT + Mod($iSlot, $SLOTS_PER_ROW) * ($SLOT_WIDTH + $SLOT_GAP)
+	Local $iTop = GetSlotTop($iSlot)
+	Local $iWidth = Int($SLOT_WIDTH * $iPercent / 100)
+	If $iWidth < 1 Then $iWidth = 1
+
+	GUICtrlSetData($g_aSlotState[$iSlot], "ЗАПИСЬ " & $iPercent & "%")
+	GUICtrlSetPos($g_aSlotIndicator[$iSlot], $iX, $iTop + 68, $iWidth, 9)
+EndFunc
+
+Func SetSlotVerificationProgress($iSlot, $iCompletedFiles)
+	If $g_iSourceFileCount <= 0 Then Return
+
+	Local $iPercent = Int($iCompletedFiles * 100 / $g_iSourceFileCount)
+	If $iPercent > 100 Then $iPercent = 100
+
+	Local $iX = $SLOT_LEFT + Mod($iSlot, $SLOTS_PER_ROW) * ($SLOT_WIDTH + $SLOT_GAP)
+	Local $iTop = GetSlotTop($iSlot)
+	Local $iWidth = Int($SLOT_WIDTH * $iPercent / 100)
+	If $iWidth < 1 Then $iWidth = 1
+
+	GUICtrlSetData($g_aSlotState[$iSlot], "ПРОВЕРКА " & $iPercent & "%")
+	GUICtrlSetPos($g_aSlotIndicator[$iSlot], $iX, $iTop + 68, $iWidth, 9)
+EndFunc
+
+Func OnManifestFileHashed($iFileCount)
 EndFunc
 
 ; UI state and utility helpers.
@@ -459,10 +613,9 @@ Func UpdateConfigurationControls()
 	If $g_bMonitoring Or HasActiveWorker() Then $iState = $GUI_DISABLE
 
 	GUICtrlSetState($g_hBtnSource, $iState)
-	GUICtrlSetState($g_hCmbSlotCount, $iState)
+	GUICtrlSetState($g_hBtnSettings, $iState)
 
 	For $i = 0 To $g_iSlotCount - 1
-		GUICtrlSetState($g_aSlotDrive[$i], $iState)
 	Next
 EndFunc
 
@@ -476,8 +629,8 @@ EndFunc
 
 Func UpdateStatusBar()
 	Local $iWorking = 0, $iErrors = 0, $i, $sText
-	For $i = 0 To $g_iSlotCount - 1
-		If $g_aSlotStatus[$i] = $SLOT_WORKING Or $g_aSlotStatus[$i] = $SLOT_EJECTING Then $iWorking += 1
+	For $i = 0 To UBound($g_aSlotStatus) - 1
+		If $g_aSlotStatus[$i] = $SLOT_WORKING Or $g_aSlotStatus[$i] = $SLOT_VERIFYING Or $g_aSlotStatus[$i] = $SLOT_EJECTING Then $iWorking += 1
 		If $g_aSlotStatus[$i] = $SLOT_ERROR Then $iErrors += 1
 	Next
 
@@ -495,7 +648,7 @@ EndFunc
 
 Func HasActiveWorker()
 	Local $i
-	For $i = 0 To $g_iSlotCount - 1
+	For $i = 0 To UBound($g_aSlotPid) - 1
 		If $g_aSlotPid[$i] <> 0 Then Return True
 	Next
 
@@ -507,8 +660,54 @@ Func CanCloseApplication()
 		Return True
 	EndIf
 
+	Local $iChoice = ShowCloseDialog()
+	If $iChoice = 1 Then
+		AbortWorkers()
+		Return True
+	EndIf
+
+	If $iChoice = 2 Then Return True
+	Return False
+
 	Local $iResult = MsgBox(BitOR($MB_ICONWARNING, $MB_YESNO), "Обработка продолжается", "Воркер(ы) продолжат работу без окна. Закрыть программу?")
 	Return $iResult = $IDYES
+EndFunc
+
+Func ShowCloseDialog()
+	Local $hDialog = GUICreate("Обработка продолжается", 390, 145, -1, -1, -1, -1, $g_hGui)
+	GUICtrlCreateLabel("Воркеры продолжают работу.", 20, 22, 340, 20)
+	GUICtrlCreateLabel("Прервать — остановить их и закрыть программу.", 20, 48, 350, 20)
+
+	Local $hAbort = GUICtrlCreateButton("Прервать", 35, 100, 95, 27)
+	Local $hOk = GUICtrlCreateButton("ОК", 147, 100, 95, 27)
+	Local $hCancel = GUICtrlCreateButton("Отмена", 259, 100, 95, 27)
+	GUISetState(@SW_SHOW, $hDialog)
+
+	While True
+		Local $aMsg = GUIGetMsg(1)
+		If $aMsg[0] = 0 Or $aMsg[1] <> $hDialog Then ContinueLoop
+		If $aMsg[0] = $hAbort Then
+			GUIDelete($hDialog)
+			Return 1
+		EndIf
+
+		If $aMsg[0] = $hOk Then
+			GUIDelete($hDialog)
+			Return 2
+		EndIf
+
+		If $aMsg[0] = $hCancel Or $aMsg[0] = $GUI_EVENT_CLOSE Then
+			GUIDelete($hDialog)
+			Return 0
+		EndIf
+	WEnd
+EndFunc
+
+Func AbortWorkers()
+	Local $i
+	For $i = 0 To UBound($g_aSlotPid) - 1
+		If $g_aSlotPid[$i] <> 0 Then ProcessClose($g_aSlotPid[$i])
+	Next
 EndFunc
 
 Func GetSlotDrive($iSlot)
@@ -533,3 +732,6 @@ Func AddLog($sText)
 	GUICtrlSendMsg($g_hLog, $EM_SETSEL, -1, -1)
 	GUICtrlSendMsg($g_hLog, $EM_SCROLLCARET, 0, 0)
 EndFunc
+
+#include "manifest.au3"
+#include "settings_dialog.au3"

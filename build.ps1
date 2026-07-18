@@ -14,11 +14,12 @@ $innoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 function Invoke-Tool {
     param(
         [string]$Path,
-        [string[]]$Arguments
+        [string[]]$ToolArgs
     )
 
-    & $Path @Arguments
-    if ($LASTEXITCODE -ne 0) {
+    & $Path @ToolArgs
+    $exitCode = $global:LASTEXITCODE
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
         throw "Команда завершилась с кодом ${LASTEXITCODE}: $Path"
     }
 }
